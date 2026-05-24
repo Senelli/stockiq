@@ -14,16 +14,20 @@ interface NewsItem {
   publishedAt: string
   sentiment: string
   sentimentScore: number
-  summary: string
 }
 
+type Period = '1D' | '5D' | '1M' | '1Y' | '5Y'
+
 export default function Home() {
-  const [ticker, setTicker]       = useState('')
-  const [data, setData]           = useState<any>(null)
-  const [chartData, setChartData] = useState<any[]>([])
-  const [news, setNews]           = useState<NewsItem[]>([])
-  const [loading, setLoading]     = useState(false)
-  const [error, setError]         = useState('')
+  const [ticker, setTicker]         = useState('')
+  const [data, setData]             = useState<any>(null)
+  const [chartData, setChartData]   = useState<any[]>([])
+  const [news, setNews]             = useState<NewsItem[]>([])
+  const [loading, setLoading]       = useState(false)
+  const [chartLoading, setChartLoading] = useState(false)
+  const [error, setError]           = useState('')
+  const [activePeriod, setActivePeriod] = useState<Period>('1M')
+  const [currentTicker, setCurrentTicker] = useState('')
 
   const KEYS = [
     process.env.NEXT_PUBLIC_AV_KEY_1,
@@ -32,9 +36,108 @@ export default function Home() {
     process.env.NEXT_PUBLIC_AV_KEY_4,
     process.env.NEXT_PUBLIC_AV_KEY_5,
   ]
-
   const getKey = () => KEYS[Math.floor(Math.random() * KEYS.length)]
 
+  // ── Fetch chart data for a given period ──────────────────
+  async function fetchChart(sym: string, period: Period) {
+    setChartLoading(true)
+    try {
+      let url = ''
+      let parsed: any[] = []
+
+      if (period === '1D') {
+        url = `https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=${sym}&interval=5min&outputsize=compact&apikey=${getKey()}`
+        const res  = await fetch(url)
+        const json = await res.json()
+        const ts   = json['Time Series (5min)']
+        if (ts) {
+          parsed = Object.entries(ts)
+            .slice(0, 78)   // ~6.5 hours of trading
+            .reverse()
+            .map(([time, v]: [string, any]) => ({
+              date:  time.slice(11, 16),  // HH:MM
+              close: parseFloat(v['4. close']),
+            }))
+        }
+
+      } else if (period === '5D') {
+        url = `https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=${sym}&interval=30min&outputsize=full&apikey=${getKey()}`
+        const res  = await fetch(url)
+        const json = await res.json()
+        const ts   = json['Time Series (30min)']
+        if (ts) {
+          parsed = Object.entries(ts)
+            .slice(0, 65)   // ~5 trading days at 30min
+            .reverse()
+            .map(([time, v]: [string, any]) => ({
+              date:  time.slice(5, 16),   // MM-DD HH:MM
+              close: parseFloat(v['4. close']),
+            }))
+        }
+
+      } else if (period === '1M') {
+        url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${sym}&outputsize=compact&apikey=${getKey()}`
+        const res  = await fetch(url)
+        const json = await res.json()
+        const ts   = json['Time Series (Daily)']
+        if (ts) {
+          parsed = Object.entries(ts)
+            .slice(0, 30)
+            .reverse()
+            .map(([date, v]: [string, any]) => ({
+              date:  date.slice(5),
+              close: parseFloat(v['4. close']),
+            }))
+        }
+
+      } else if (period === '1Y') {
+        url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${sym}&outputsize=full&apikey=${getKey()}`
+        const res  = await fetch(url)
+        const json = await res.json()
+        const ts   = json['Time Series (Daily)']
+        if (ts) {
+          parsed = Object.entries(ts)
+            .slice(0, 252)  // ~1 trading year
+            .reverse()
+            .map(([date, v]: [string, any]) => ({
+              date:  date.slice(5),
+              close: parseFloat(v['4. close']),
+            }))
+        }
+
+      } else if (period === '5Y') {
+        url = `https://www.alphavantage.co/query?function=TIME_SERIES_WEEKLY_ADJUSTED&symbol=${sym}&apikey=${getKey()}`
+        const res  = await fetch(url)
+        const json = await res.json()
+        const ts   = json['Weekly Adjusted Time Series']
+        if (ts) {
+          parsed = Object.entries(ts)
+            .slice(0, 260)  // 5 years of weekly data
+            .reverse()
+            .map(([date, v]: [string, any]) => ({
+              date:  date.slice(0, 7),    // YYYY-MM
+              close: parseFloat(v['5. adjusted close']),
+            }))
+        }
+      }
+
+      setChartData(parsed)
+    } catch (e) {
+      console.error('Chart fetch error', e)
+    } finally {
+      setChartLoading(false)
+    }
+  }
+
+  // ── Handle period button click ────────────────────────────
+  async function handlePeriod(period: Period) {
+    setActivePeriod(period)
+    if (currentTicker) {
+      await fetchChart(currentTicker, period)
+    }
+  }
+
+  // ── Main search ───────────────────────────────────────────
   async function searchStock() {
     if (!ticker.trim()) return
     setLoading(true)
@@ -46,7 +149,7 @@ export default function Home() {
     const sym = ticker.toUpperCase()
 
     try {
-      // ── 1. Live quote ──────────────────────────────────────
+      // 1. Live quote
       const quoteRes  = await fetch(
         `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${sym}&apikey=${getKey()}`
       )
@@ -70,25 +173,12 @@ export default function Home() {
         prevClose: parseFloat(quote['08. previous close']).toFixed(2),
       })
 
-      // ── 2. Price history ───────────────────────────────────
-      const histRes  = await fetch(
-        `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${sym}&outputsize=compact&apikey=${getKey()}`
-      )
-      const histJson = await histRes.json()
-      const ts       = histJson['Time Series (Daily)']
+      setCurrentTicker(sym)
 
-      if (ts) {
-        const chart = Object.entries(ts)
-          .slice(0, 30)
-          .reverse()
-          .map(([date, v]: [string, any]) => ({
-            date:  date.slice(5),
-            close: parseFloat(v['4. close']),
-          }))
-        setChartData(chart)
-      }
+      // 2. Chart (default 1M)
+      await fetchChart(sym, activePeriod)
 
-      // ── 3. News + sentiment ────────────────────────────────
+      // 3. News + sentiment
       const newsRes  = await fetch(
         `https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=${sym}&limit=10&apikey=${getKey()}`
       )
@@ -97,17 +187,13 @@ export default function Home() {
 
       if (feed && feed.length > 0) {
         const parsed: NewsItem[] = feed.slice(0, 8).map((item: any) => {
-          // Find sentiment score for this specific ticker
-          const tickerSentiment = item.ticker_sentiment?.find(
-            (t: any) => t.ticker === sym
-          )
-          const score  = tickerSentiment
-            ? parseFloat(tickerSentiment.ticker_sentiment_score)
+          const ts    = item.ticker_sentiment?.find((t: any) => t.ticker === sym)
+          const score = ts
+            ? parseFloat(ts.ticker_sentiment_score)
             : parseFloat(item.overall_sentiment_score || '0')
-          const label  = tickerSentiment
-            ? tickerSentiment.ticker_sentiment_label
+          const label = ts
+            ? ts.ticker_sentiment_label
             : item.overall_sentiment_label || 'Neutral'
-
           return {
             title:          item.title,
             url:            item.url,
@@ -115,7 +201,6 @@ export default function Home() {
             publishedAt:    item.time_published?.slice(0, 8) || '',
             sentiment:      label,
             sentimentScore: score,
-            summary:        item.summary?.slice(0, 120) + '...' || '',
           }
         })
         setNews(parsed)
@@ -128,27 +213,22 @@ export default function Home() {
     }
   }
 
-  const isPositive = data && parseFloat(data.change) >= 0
-
-  // Calculate overall sentiment from news
+  const isPositive   = data && parseFloat(data.change) >= 0
+  const posCount     = news.filter(n => n.sentiment.toLowerCase().includes('bullish') || n.sentiment.toLowerCase().includes('positive')).length
+  const negCount     = news.filter(n => n.sentiment.toLowerCase().includes('bearish') || n.sentiment.toLowerCase().includes('negative')).length
+  const neuCount     = news.length - posCount - negCount
   const avgSentiment = news.length > 0
-    ? news.reduce((sum, n) => sum + n.sentimentScore, 0) / news.length
-    : 0
-
-  const overallLabel = avgSentiment > 0.15
-    ? 'Positive' : avgSentiment < -0.15
-    ? 'Negative' : 'Neutral'
-
-  const posCount = news.filter(n => n.sentiment.toLowerCase().includes('bullish') || n.sentiment.toLowerCase().includes('positive')).length
-  const negCount = news.filter(n => n.sentiment.toLowerCase().includes('bearish') || n.sentiment.toLowerCase().includes('negative')).length
-  const neuCount = news.length - posCount - negCount
+    ? news.reduce((s, n) => s + n.sentimentScore, 0) / news.length : 0
+  const overallLabel = avgSentiment > 0.15 ? 'Positive'
+    : avgSentiment < -0.15 ? 'Negative' : 'Neutral'
 
   function SentimentBadge({ label }: { label: string }) {
-    const l = label.toLowerCase()
+    const l     = label.toLowerCase()
     const isBull = l.includes('bullish') || l.includes('positive')
     const isBear = l.includes('bearish') || l.includes('negative')
     return (
-      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold
+      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full
+                        text-xs font-semibold whitespace-nowrap
         ${isBull ? 'bg-green-50 text-green-700' :
           isBear ? 'bg-red-50 text-red-700' :
                    'bg-gray-100 text-gray-500'}`}>
@@ -159,6 +239,8 @@ export default function Home() {
       </span>
     )
   }
+
+  const PERIODS: Period[] = ['1D', '5D', '1M', '1Y', '5Y']
 
   return (
     <main className="min-h-screen bg-gray-50 p-8">
@@ -183,13 +265,10 @@ export default function Home() {
                        focus:outline-none focus:ring-2 focus:ring-blue-500
                        text-sm font-mono uppercase"
           />
-          <button
-            onClick={searchStock}
-            disabled={loading}
+          <button onClick={searchStock} disabled={loading}
             className="px-5 py-3 bg-gray-900 text-white rounded-xl
                        hover:bg-gray-700 transition-colors disabled:opacity-50
-                       flex items-center gap-2 text-sm font-medium"
-          >
+                       flex items-center gap-2 text-sm font-medium">
             <Search size={16} />
             {loading ? 'Loading...' : 'Search'}
           </button>
@@ -244,53 +323,81 @@ export default function Home() {
               ].map(([label, value]) => (
                 <div key={label} className="bg-gray-50 rounded-xl p-4">
                   <div className="text-xs text-gray-400 mb-1">{label}</div>
-                  <div className="text-sm font-semibold text-gray-800">{value}</div>
+                  <div className="text-sm font-semibold text-gray-800">
+                    {value}
+                  </div>
                 </div>
               ))}
             </div>
           </div>
         )}
 
-        {/* Price chart */}
-        {chartData.length > 0 && (
+        {/* Chart */}
+        {(chartData.length > 0 || chartLoading) && (
           <div className="bg-white rounded-2xl border border-gray-100
                           shadow-sm p-6 mb-6">
-            <h2 className="text-sm font-semibold text-gray-500 mb-4">
-              30-DAY PRICE HISTORY
-            </h2>
-            <ResponsiveContainer width="100%" height={240}>
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis dataKey="date"
-                  tick={{ fontSize: 11, fill: '#9ca3af' }}
-                  tickLine={false} interval={4} />
-                <YAxis
-                  tick={{ fontSize: 11, fill: '#9ca3af' }}
-                  tickLine={false} axisLine={false}
-                  tickFormatter={v => `$${v}`}
-                  domain={['auto', 'auto']} />
-                <Tooltip
-                  formatter={(v: any) => [`$${v}`, 'Close']}
-                  contentStyle={{ borderRadius: '8px',
-                    border: '1px solid #e5e7eb', fontSize: '12px' }} />
-                <Line type="monotone" dataKey="close"
-                  stroke={isPositive ? '#16a34a' : '#dc2626'}
-                  strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-              </LineChart>
-            </ResponsiveContainer>
+            {/* Period selector */}
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-gray-500">
+                PRICE HISTORY
+              </h2>
+              <div className="flex gap-1">
+                {PERIODS.map(p => (
+                  <button key={p} onClick={() => handlePeriod(p)}
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold
+                                transition-colors
+                      ${activePeriod === p
+                        ? 'bg-gray-900 text-white'
+                        : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
+                    {p}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {chartLoading ? (
+              <div className="h-60 flex items-center justify-center
+                              text-gray-400 text-sm">
+                Loading chart...
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                  <XAxis dataKey="date"
+                    tick={{ fontSize: 10, fill: '#9ca3af' }}
+                    tickLine={false}
+                    interval={Math.floor(chartData.length / 6)} />
+                  <YAxis
+                    tick={{ fontSize: 11, fill: '#9ca3af' }}
+                    tickLine={false} axisLine={false}
+                    tickFormatter={v => `$${v}`}
+                    domain={['auto', 'auto']} />
+                  <Tooltip
+                    formatter={(v: any) => [`$${v}`, 'Price']}
+                    contentStyle={{ borderRadius: '8px',
+                      border: '1px solid #e5e7eb', fontSize: '12px' }} />
+                  <Line type="monotone" dataKey="close"
+                    stroke={isPositive ? '#16a34a' : '#dc2626'}
+                    strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+            <p className="text-xs text-gray-400 mt-3 text-center">
+              Data provided by Alpha Vantage · Not financial advice
+            </p>
           </div>
         )}
 
-        {/* Sentiment summary */}
+        {/* Sentiment */}
         {news.length > 0 && (
           <div className="bg-white rounded-2xl border border-gray-100
                           shadow-sm p-6 mb-6">
             <h2 className="text-sm font-semibold text-gray-500 mb-4">
               NEWS SENTIMENT
             </h2>
-
-            {/* Overall score */}
-            <div className="flex items-center gap-4 mb-6 p-4 bg-gray-50 rounded-xl">
+            <div className="flex items-center gap-4 mb-4 p-4
+                            bg-gray-50 rounded-xl">
               <div className={`text-2xl font-bold
                 ${overallLabel === 'Positive' ? 'text-green-600' :
                   overallLabel === 'Negative' ? 'text-red-600' :
@@ -301,37 +408,28 @@ export default function Home() {
                 Based on {news.length} recent articles
               </div>
               <div className="ml-auto flex gap-3 text-xs font-medium">
-                <span className="text-green-600">
-                  {posCount} positive
-                </span>
-                <span className="text-gray-400">
-                  {neuCount} neutral
-                </span>
-                <span className="text-red-600">
-                  {negCount} negative
-                </span>
+                <span className="text-green-600">{posCount} positive</span>
+                <span className="text-gray-400">{neuCount} neutral</span>
+                <span className="text-red-600">{negCount} negative</span>
               </div>
             </div>
-
-            {/* Sentiment bar */}
-            <div className="flex h-2 rounded-full overflow-hidden mb-6">
-              <div className="bg-green-400 transition-all"
-                   style={{ width: `${(posCount / news.length) * 100}%` }} />
-              <div className="bg-gray-200 transition-all"
-                   style={{ width: `${(neuCount / news.length) * 100}%` }} />
-              <div className="bg-red-400 transition-all"
-                   style={{ width: `${(negCount / news.length) * 100}%` }} />
+            <div className="flex h-2 rounded-full overflow-hidden mb-5">
+              <div className="bg-green-400"
+                style={{ width: `${(posCount / news.length) * 100}%` }} />
+              <div className="bg-gray-200"
+                style={{ width: `${(neuCount / news.length) * 100}%` }} />
+              <div className="bg-red-400"
+                style={{ width: `${(negCount / news.length) * 100}%` }} />
             </div>
-
-            {/* News list */}
             <div className="space-y-4">
               {news.map((item, i) => (
                 <div key={i}
-                     className="border-b border-gray-100 pb-4 last:border-0 last:pb-0">
+                  className="border-b border-gray-100 pb-4 last:border-0 last:pb-0">
                   <div className="flex items-start justify-between gap-3 mb-1">
                     <a href={item.url} target="_blank" rel="noopener noreferrer"
-                       className="text-sm font-medium text-gray-800
-                                  hover:text-blue-600 transition-colors leading-snug">
+                      className="text-sm font-medium text-gray-800
+                                 hover:text-blue-600 transition-colors
+                                 leading-snug">
                       {item.title}
                     </a>
                     <SentimentBadge label={item.sentiment} />
@@ -342,7 +440,6 @@ export default function Home() {
                 </div>
               ))}
             </div>
-
             <p className="text-xs text-gray-400 mt-4 text-center">
               Sentiment powered by Alpha Vantage · Not financial advice
             </p>
